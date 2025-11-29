@@ -34,6 +34,12 @@ pub fn main() !void {
                 return err;
             };
         },
+        .update => {
+            scaffold.updateProject(allocator) catch |err| {
+                ui.printError("Update failed: {}", .{err});
+                return err;
+            };
+        },
         .help => {
             cli.printUsage();
         },

@@ -13,6 +13,7 @@ pub const Command = union(enum) {
     ci_init: struct {
         output_dir: []const u8,
     },
+    update: void,
     help: void,
 };
 
@@ -58,6 +59,8 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Command {
             return .help;
         };
         return Command{ .ci_init = .{ .output_dir = output_dir } };
+    } else if (std.mem.eql(u8, cmd_str, "update")) {
+        return .update;
     } else if (std.mem.eql(u8, cmd_str, "help") or std.mem.eql(u8, cmd_str, "--help") or std.mem.eql(u8, cmd_str, "-h")) {
         return .help;
     } else {
@@ -75,6 +78,7 @@ pub fn printUsage() void {
         \\  init <spec_source> <output_dir>      Initialize a new Zig project with generated client
         \\    --skip-ci                          Skip generation of GitHub Actions CI workflow
         \\  ci-init <output_dir>                 Generate GitHub Actions CI workflow
+        \\  update                               Update client code from upstream spec (requires .openapi-config.json)
         \\  help                                 Show this help message
         \\
     , .{});

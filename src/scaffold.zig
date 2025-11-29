@@ -51,11 +51,17 @@ pub fn generateProject(allocator: std.mem.Allocator, spec_source: []const u8, ou
     try writeFile(output_dir, ".gitignore", gitignore_template);
     try writeFile(output_dir, "README.md", readme_template);
 
+    // Generate config file
+    const config_content = try std.fmt.allocPrint(allocator, config_template, .{spec_source});
+    defer allocator.free(config_content);
+    try writeFile(output_dir, ".openapi-config.json", config_content);
+
     std.debug.print("Project initialized in {s}\n", .{output_dir_path});
 
     // 5. Generate CI (optional)
     if (!skip_ci) {
         try generateCI(output_dir_path);
+        try generateUpdateWorkflow(output_dir_path);
     }
 
     // 6. Auto-fix fingerprint
@@ -76,6 +82,71 @@ pub fn generateCI(output_dir_path: []const u8) !void {
 
     try writeFile(workflows_dir, "ci.yml", ci_workflow_template);
     std.debug.print("CI workflow generated in {s}/.github/workflows/ci.yml\n", .{output_dir_path});
+}
+
+pub fn generateUpdateWorkflow(output_dir_path: []const u8) !void {
+    var output_dir = try std.fs.cwd().openDir(output_dir_path, .{});
+    defer output_dir.close();
+
+    const workflows_dir_path = ".github/workflows";
+    try output_dir.makePath(workflows_dir_path);
+    var workflows_dir = try output_dir.openDir(workflows_dir_path, .{});
+    defer workflows_dir.close();
+
+    try writeFile(workflows_dir, "update.yml", update_workflow_template);
+    std.debug.print("Update workflow generated in {s}/.github/workflows/update.yml\n", .{output_dir_path});
+}
+
+pub fn updateProject(allocator: std.mem.Allocator) !void {
+    // 1. Read config
+    const config_file = std.fs.cwd().openFile(".openapi-config.json", .{}) catch |err| {
+        if (err == error.FileNotFound) {
+            ui.printError("No .openapi-config.json found. Run 'openapi-gen init' to create a new project.", .{});
+            return error.ConfigNotFound;
+        }
+        return err;
+    };
+    defer config_file.close();
+
+    const config_content = try config_file.readToEndAlloc(allocator, 1024 * 1024);
+    defer allocator.free(config_content);
+
+    const Config = struct {
+        spec_url: []const u8,
+        output_dir: []const u8,
+    };
+
+    const parsed_config = try std.json.parseFromSlice(Config, allocator, config_content, .{ .ignore_unknown_fields = true });
+    defer parsed_config.deinit();
+    const config = parsed_config.value;
+
+    ui.printInfo("Updating client from {s}...", .{config.spec_url});
+
+    // 2. Fetch spec
+    const spec_content = try fetch.fetchSpec(allocator, config.spec_url);
+    defer allocator.free(spec_content);
+
+    // 3. Regenerate
+    var output_dir = try std.fs.cwd().openDir(config.output_dir, .{});
+    defer output_dir.close();
+
+    {
+        var spinner = ui.Spinner.init(allocator, "Regenerating client code...");
+        try spinner.start();
+        defer spinner.stop();
+
+        var parsed_spec = try parser.parse(allocator, spec_content);
+        defer parsed_spec.deinit();
+
+        try generator.generate(allocator, parsed_spec.value, output_dir);
+    }
+
+    // 4. Update fingerprint
+    fixFingerprint(allocator, ".") catch |err| {
+        std.debug.print("Warning: Failed to update fingerprint: {}\n", .{err});
+    };
+
+    ui.printInfo("Client updated successfully!", .{});
 }
 
 fn fixFingerprint(allocator: std.mem.Allocator, project_path: []const u8) !void {
@@ -134,6 +205,14 @@ fn writeFile(dir: std.fs.Dir, path: []const u8, content: []const u8) !void {
     try file.writeAll(content);
 }
 
+const config_template =
+    \\{{
+    \\    "spec_url": "{s}",
+    \\    "output_dir": "src",
+    \\    "package_name": "client"
+    \\}}
+;
+
 const ci_workflow_template =
     \\name: CI
     \\
@@ -155,6 +234,49 @@ const ci_workflow_template =
     \\      run: zig build
     \\    - name: Run Tests
     \\      run: zig build test
+;
+
+const update_workflow_template =
+    \\name: Auto Update
+    \\
+    \\on:
+    \\  schedule:
+    \\    - cron: '0 0 * * *' # Daily at midnight
+    \\  workflow_dispatch:
+    \\
+    \\jobs:
+    \\  update:
+    \\    runs-on: ubuntu-latest
+    \\    permissions:
+    \\      contents: write
+    \\    steps:
+    \\    - uses: actions/checkout@v4
+    \\
+    \\    - uses: mlugg/setup-zig@v2
+    \\      with:
+    \\        version: 0.15.2
+    \\
+    \\    - name: Install openapi-gen
+    \\      run: |
+    \\        curl -sSL https://raw.githubusercontent.com/ryanhair/zig-openapi-gen/main/scripts/install.sh | bash
+    \\        echo "$HOME/.local/bin" >> $GITHUB_PATH
+    \\
+    \\    - name: Update Client
+    \\      run: openapi-gen update
+    \\
+    \\    - name: Check for changes
+    \\      id: git-check
+    \\      run: |
+    \\        git diff --exit-code || echo "changes=true" >> $GITHUB_OUTPUT
+    \\
+    \\    - name: Commit and Push
+    \\      if: steps.git-check.outputs.changes == 'true'
+    \\      run: |
+    \\        git config --global user.name 'github-actions[bot]'
+    \\        git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+    \\        git add .
+    \\        git commit -m "chore: update client from upstream spec"
+    \\        git push
 ;
 
 const build_zig_template =
@@ -204,7 +326,7 @@ const build_zig_zon_template =
 ;
 
 const gitignore_template =
-    \\zig-cache/
+    \\.zig-cache/
     \\zig-out/
     \\
 ;
