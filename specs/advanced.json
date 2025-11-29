@@ -1,0 +1,336 @@
+{
+    "openapi": "3.0.0",
+    "info": {
+        "title": "Advanced API",
+        "version": "1.0.0"
+    },
+    "servers": [
+        {
+            "url": "https://{environment}.example.com/v1",
+            "description": "Main API Server",
+            "variables": {
+                "environment": {
+                    "default": "api",
+                    "description": "The environment to target (api, staging, dev)"
+                }
+            }
+        },
+        {
+            "url": "http://localhost:{port}",
+            "description": "Local Development Server",
+            "variables": {
+                "port": {
+                    "default": "8080",
+                    "description": "The port to connect to"
+                }
+            }
+        }
+    ],
+    "components": {
+        "schemas": {
+            "Status": {
+                "type": "string",
+                "enum": [
+                    "active",
+                    "inactive",
+                    "pending"
+                ]
+            },
+            "Cat": {
+                "type": "object",
+                "properties": {
+                    "type": {
+                        "type": "string"
+                    },
+                    "meow": {
+                        "type": "boolean"
+                    }
+                },
+                "required": [
+                    "type"
+                ]
+            },
+            "Dog": {
+                "type": "object",
+                "properties": {
+                    "type": {
+                        "type": "string"
+                    },
+                    "bark": {
+                        "type": "boolean"
+                    }
+                },
+                "required": [
+                    "type"
+                ]
+            },
+            "Pet": {
+                "oneOf": [
+                    {
+                        "$ref": "#/components/schemas/Cat"
+                    },
+                    {
+                        "$ref": "#/components/schemas/Dog"
+                    }
+                ],
+                "discriminator": {
+                    "propertyName": "type"
+                }
+            },
+            "User": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "integer"
+                    },
+                    "username": {
+                        "type": "string"
+                    }
+                }
+            },
+            "ExtendedUser": {
+                "allOf": [
+                    {
+                        "$ref": "#/components/schemas/User"
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "role": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                ]
+            },
+            "AnyOfStruct": {
+                "anyOf": [
+                    {
+                        "$ref": "#/components/schemas/Cat"
+                    },
+                    {
+                        "$ref": "#/components/schemas/Dog"
+                    }
+                ]
+            },
+            "NumberStruct": {
+                "type": "object",
+                "properties": {
+                    "value": {
+                        "type": "number"
+                    },
+                    "int_val": {
+                        "type": "integer"
+                    }
+                }
+            },
+            "UploadFile": {
+                "type": "object",
+                "properties": {
+                    "file": {
+                        "type": "string",
+                        "format": "binary"
+                    },
+                    "description": {
+                        "type": "string"
+                    }
+                }
+            },
+            "SubmitForm": {
+                "type": "object",
+                "properties": {
+                    "field1": {
+                        "type": "string"
+                    },
+                    "field2": {
+                        "type": "string"
+                    }
+                }
+            },
+            "DictStruct": {
+                "type": "object",
+                "additionalProperties": {
+                    "type": "string"
+                }
+            },
+            "ValidatedStruct": {
+                "type": "object",
+                "properties": {
+                    "string_val": {
+                        "type": "string",
+                        "minLength": 5,
+                        "maxLength": 10
+                    },
+                    "int_val": {
+                        "type": "integer",
+                        "minimum": 10,
+                        "maximum": 100
+                    },
+                    "required_field": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "required_field"
+                ]
+            },
+            "ParentStruct": {
+                "type": "object",
+                "properties": {
+                    "child": {
+                        "$ref": "#/components/schemas/ValidatedStruct"
+                    },
+                    "children": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/ValidatedStruct"
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "paths": {
+        "/upload": {
+            "post": {
+                "operationId": "uploadFile",
+                "requestBody": {
+                    "content": {
+                        "multipart/form-data": {
+                            "schema": {
+                                "$ref": "#/components/schemas/UploadFile"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "File uploaded"
+                    }
+                }
+            }
+        },
+        "/form": {
+            "post": {
+                "operationId": "submitForm",
+                "requestBody": {
+                    "content": {
+                        "application/x-www-form-urlencoded": {
+                            "schema": {
+                                "$ref": "#/components/schemas/SubmitForm"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Form submitted"
+                    }
+                }
+            }
+        },
+        "/serialized-params": {
+            "get": {
+                "operationId": "getSerializedParams",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "query",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "type": "integer"
+                            }
+                        },
+                        "style": "form",
+                        "explode": true
+                    },
+                    {
+                        "name": "space",
+                        "in": "query",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "type": "integer"
+                            }
+                        },
+                        "style": "spaceDelimited",
+                        "explode": false
+                    },
+                    {
+                        "name": "pipe",
+                        "in": "query",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "type": "integer"
+                            }
+                        },
+                        "style": "pipeDelimited",
+                        "explode": false
+                    },
+                    {
+                        "name": "deep",
+                        "in": "query",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "role": {
+                                    "type": "string"
+                                },
+                                "firstName": {
+                                    "type": "string"
+                                }
+                            }
+                        },
+                        "style": "deepObject",
+                        "explode": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    }
+                }
+            }
+        },
+        "/validate": {
+            "post": {
+                "operationId": "validateData",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ValidatedStruct"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Valid data"
+                    }
+                }
+            }
+        },
+        "/validate-recursive": {
+            "post": {
+                "operationId": "validateRecursive",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ParentStruct"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Valid recursive data"
+                    }
+                }
+            }
+        }
+    }
+}

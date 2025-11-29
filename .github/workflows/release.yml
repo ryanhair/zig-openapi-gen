@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-linux
+            os: ubuntu-latest
+            zig-target: x86_64-linux
+            archive-ext: tar.gz
+          - target: aarch64-linux
+            os: ubuntu-latest
+            zig-target: aarch64-linux
+            archive-ext: tar.gz
+          - target: x86_64-macos
+            os: macos-latest
+            zig-target: x86_64-macos
+            archive-ext: tar.gz
+          - target: aarch64-macos
+            os: macos-latest
+            zig-target: aarch64-macos
+            archive-ext: tar.gz
+          - target: x86_64-windows
+            os: ubuntu-latest # Cross-compile from Linux is faster/cheaper usually, but Windows runner is fine too. Let's use ubuntu for consistency if possible, but Windows runner ensures no cross-compile weirdness. Actually Zig cross-compiles great.
+            zig-target: x86_64-windows
+            archive-ext: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.zig-target }}
+
+      - name: Archive
+        shell: bash
+        run: |
+          if [ "${{ matrix.target }}" == "x86_64-windows" ]; then
+            cd zig-out/bin
+            zip -r ../../openapi-gen-${{ matrix.target }}.zip openapi-gen.exe
+          else
+            cd zig-out/bin
+            tar -czf ../../openapi-gen-${{ matrix.target }}.tar.gz openapi-gen
+          fi
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openapi-gen-${{ matrix.target }}
+          path: openapi-gen-${{ matrix.target }}.${{ matrix.archive-ext }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: artifacts/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

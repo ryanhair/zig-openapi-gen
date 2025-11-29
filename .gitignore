@@ -1,0 +1,7 @@
+zig-cache/
+zig-out/
+build/
+.zig-cache/
+.DS_Store
+.vscode/
+src/generated/
