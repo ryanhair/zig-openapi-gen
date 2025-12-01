@@ -1383,7 +1383,7 @@ fn generateOperation(op: std.json.Value, path_item: std.json.Value, path: []cons
     try writer.print("            .location = .{{ .uri = try std.Uri.parse(url) }},\n", .{});
     try writer.print("            .method = .{s}, // Use format specifier for method\n", .{method_upper});
     try writer.print("            .extra_headers = extra_headers.items,\n", .{});
-    try writer.print("            .payload = if (req_body_writer.writer.buffer.len > 0) req_body_writer.writer.buffer else null,\n", .{});
+    try writer.print("            .payload = if (req_body_writer.writer.end > 0) req_body_writer.writer.buffer[0..req_body_writer.writer.end] else null,\n", .{});
     try writer.print("            .response_writer = &ctx.writer,\n", .{});
     try writer.print("        }});\n", .{});
     try writer.print("        \n", .{});
@@ -1446,7 +1446,7 @@ fn generateOperation(op: std.json.Value, path_item: std.json.Value, path: []cons
             if (std.mem.eql(u8, code, "200")) tag_name = "ok" else if (std.mem.eql(u8, code, "201")) tag_name = "created" else if (std.mem.eql(u8, code, "202")) tag_name = "accepted" else if (std.mem.eql(u8, code, "204")) tag_name = "no_content" else if (std.mem.eql(u8, code, "400")) tag_name = "bad_request" else if (std.mem.eql(u8, code, "401")) tag_name = "unauthorized" else if (std.mem.eql(u8, code, "403")) tag_name = "forbidden" else if (std.mem.eql(u8, code, "404")) tag_name = "not_found" else tag_name = "unknown";
 
             if (resp_body_type) |bt| {
-                try writer.print("                const body_resp = body_list.items;\n", .{});
+                try writer.print("                const body_resp = try arena.allocator().dupe(u8, body_list.items);\n", .{});
                 try writer.print("                const parsed = try std.json.parseFromSliceLeaky({s}, arena.allocator(), body_resp, .{{ .ignore_unknown_fields = true }});\n", .{bt});
                 try writer.print("                return .{{ .{s} = .{{ .body = parsed, .headers = headers, .arena = arena }} }};\n", .{tag_name});
             } else {
