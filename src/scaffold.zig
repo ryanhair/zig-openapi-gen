@@ -139,6 +139,20 @@ pub fn updateProject(allocator: std.mem.Allocator) !void {
         defer parsed_spec.deinit();
 
         try generator.generate(allocator, parsed_spec.value, output_dir);
+
+        // Update version
+        const current_version = try getCurrentVersion(allocator, ".");
+        defer allocator.free(current_version);
+
+        const new_version = if (try extractVersion(allocator, parsed_spec.value)) |v| v else try incrementPatchVersion(allocator, current_version);
+        defer allocator.free(new_version);
+
+        if (!std.mem.eql(u8, current_version, new_version)) {
+             try updateBuildZigZon(allocator, ".", new_version);
+             ui.printInfo("Updated version: {s} -> {s}", .{current_version, new_version});
+        } else {
+             ui.printInfo("Version unchanged: {s}", .{current_version});
+        }
     }
 
     // 4. Update fingerprint
@@ -197,6 +211,104 @@ fn fixFingerprint(allocator: std.mem.Allocator, project_path: []const u8) !void 
     } else {
         return error.FingerprintNotFound;
     }
+}
+
+fn getCurrentVersion(allocator: std.mem.Allocator, project_path: []const u8) ![]const u8 {
+    var dir = try std.fs.cwd().openDir(project_path, .{});
+    defer dir.close();
+
+    const content = try dir.readFileAlloc(allocator, "build.zig.zon", 1024 * 1024);
+    defer allocator.free(content);
+
+    const needle = ".version = \"";
+    if (std.mem.indexOf(u8, content, needle)) |start_idx| {
+        const start = start_idx + needle.len;
+        if (std.mem.indexOfScalarPos(u8, content, start, '"')) |end_idx| {
+            return allocator.dupe(u8, content[start..end_idx]);
+        }
+    }
+    return error.VersionNotFound;
+}
+
+fn updateBuildZigZon(allocator: std.mem.Allocator, project_path: []const u8, new_version: []const u8) !void {
+    var dir = try std.fs.cwd().openDir(project_path, .{});
+    defer dir.close();
+
+    const content = try dir.readFileAlloc(allocator, "build.zig.zon", 1024 * 1024);
+    defer allocator.free(content);
+
+    const needle = ".version = \"";
+    if (std.mem.indexOf(u8, content, needle)) |start_idx| {
+        const start = start_idx + needle.len;
+        if (std.mem.indexOfScalarPos(u8, content, start, '"')) |end_idx| {
+            var new_content = std.ArrayList(u8){};
+            defer new_content.deinit(allocator);
+
+            try new_content.appendSlice(allocator, content[0..start]);
+            try new_content.appendSlice(allocator, new_version);
+            try new_content.appendSlice(allocator, content[end_idx..]);
+
+            var file = try dir.createFile("build.zig.zon", .{});
+            defer file.close();
+            try file.writeAll(new_content.items);
+            return;
+        }
+    }
+    return error.VersionNotFound;
+}
+
+fn extractVersion(allocator: std.mem.Allocator, parsed_spec: std.json.Value) !?[]const u8 {
+    if (parsed_spec != .object) return null;
+    const info = parsed_spec.object.get("info") orelse return null;
+    if (info != .object) return null;
+    const version = info.object.get("version") orelse return null;
+    if (version != .string) return null;
+
+    const v = version.string;
+    if (std.mem.indexOf(u8, v, "unversioned") != null) return null;
+
+    // Sanitize: remove leading 'v', keep only digits and dots
+    var sanitized = std.ArrayList(u8){};
+    defer sanitized.deinit(allocator);
+
+    for (v) |c| {
+        if (std.ascii.isDigit(c) or c == '.') {
+            try sanitized.append(allocator, c);
+        }
+    }
+
+    const s = try sanitized.toOwnedSlice(allocator);
+    errdefer allocator.free(s);
+
+    // Check components
+    var count: usize = 0;
+    for (s) |c| {
+        if (c == '.') count += 1;
+    }
+
+    if (count == 0) {
+        // e.g. "1" -> "1.0.0"
+        defer allocator.free(s);
+        const res = try std.fmt.allocPrint(allocator, "{s}.0.0", .{s});
+        return res;
+    } else if (count == 1) {
+        // e.g. "1.0" -> "1.0.0"
+        defer allocator.free(s);
+        const res = try std.fmt.allocPrint(allocator, "{s}.0", .{s});
+        return res;
+    }
+
+    return s;
+}
+
+fn incrementPatchVersion(allocator: std.mem.Allocator, current_version: []const u8) ![]const u8 {
+    var it = std.mem.splitScalar(u8, current_version, '.');
+    const major = it.next() orelse return error.InvalidVersion;
+    const minor = it.next() orelse return error.InvalidVersion;
+    const patch = it.next() orelse return error.InvalidVersion;
+
+    const patch_int = try std.fmt.parseInt(u32, patch, 10);
+    return std.fmt.allocPrint(allocator, "{s}.{s}.{d}", .{major, minor, patch_int + 1});
 }
 
 fn writeFile(dir: std.fs.Dir, path: []const u8, content: []const u8) !void {
@@ -277,6 +389,13 @@ const update_workflow_template =
     \\        git add .
     \\        git commit -m "chore: update client from upstream spec"
     \\        git push
+    \\
+    \\    - name: Create Release Tag
+    \\      if: steps.git-check.outputs.changes == 'true'
+    \\      run: |
+    \\        VERSION=$(grep '.version = "' build.zig.zon | sed 's/.*"\(.*\)".*/\1/')
+    \\        git tag "v$VERSION"
+    \\        git push origin "v$VERSION"
 ;
 
 const build_zig_template =
