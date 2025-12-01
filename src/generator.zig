@@ -879,7 +879,7 @@ fn generateResponseTypes(op_id: []const u8, responses: std.json.Value, writer: a
             try writer.print("        body: {s},\n", .{bt});
         }
         try writer.print("        headers: []const std.http.Header,\n", .{});
-        try writer.print("        arena: *std.heap.ArenaAllocator,\n", .{});
+        try writer.print("        arena: std.heap.ArenaAllocator,\n", .{});
         try writer.print("    }};\n", .{});
 
         // Add to variants list
@@ -1393,9 +1393,8 @@ fn generateOperation(op: std.json.Value, path_item: std.json.Value, path: []cons
     try writer.print("        // Headers are not available from client.fetch, so we return empty headers for now.\n", .{});
     try writer.print("        // This is a workaround for Zig 0.15.2 std.http.Client limitations/bugs.\n", .{});
     try writer.print("        const headers = try self.allocator.alloc(std.http.Header, 0);\n", .{});
-    try writer.print("        var arena = try self.allocator.create(std.heap.ArenaAllocator);\n", .{});
-    try writer.print("        arena.* = std.heap.ArenaAllocator.init(self.allocator);\n", .{});
-    try writer.print("        errdefer {{ arena.deinit(); self.allocator.destroy(arena); }}\n", .{});
+    try writer.print("        var arena = std.heap.ArenaAllocator.init(self.allocator);\n", .{});
+    try writer.print("        errdefer arena.deinit();\n", .{});
     try writer.print("\n", .{});
     try writer.print("        const response = struct {{ head: struct {{ status: std.http.Status }} }}{{ .head = .{{ .status = fetch_res.status }} }};\n", .{});
     try writer.writeAll("        switch (response.head.status) {\n");
