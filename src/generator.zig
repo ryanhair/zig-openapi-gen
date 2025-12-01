@@ -1469,6 +1469,7 @@ fn generateOperation(op: std.json.Value, path_item: std.json.Value, path: []cons
         // For now just return default_response with headers
         try writer.print("                return .{{ .default_response = .{{ .headers = headers, .arena = arena }} }};\n", .{});
     } else {
+        try writer.print("                std.log.warn(\"Unexpected status code: {{d}}\", .{{response.head.status}});\n", .{});
         try writer.print("                return error.UnexpectedStatus;\n", .{});
     }
     try writer.print("            }}\n", .{});
