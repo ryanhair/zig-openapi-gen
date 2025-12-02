@@ -1375,6 +1375,37 @@ fn generateOperation(op: std.json.Value, path_item: std.json.Value, path: []cons
     var method_buf: [16]u8 = undefined;
     const method_upper = std.ascii.upperString(&method_buf, method);
 
+    // Special handling for DeleteOptions in DELETE requests (map to query params)
+    if (std.mem.eql(u8, method_upper, "DELETE") and body_type != null and std.mem.indexOf(u8, body_type.?, "DeleteOptions") != null) {
+        if (!has_query_params) {
+            try writer.print("        var first_query = true;\n", .{});
+            try writer.print("        _ = &first_query;\n", .{});
+        }
+
+        try writer.print("        if (@hasField(@TypeOf(body), \"gracePeriodSeconds\")) {{\n", .{});
+        try writer.print("            if (body.gracePeriodSeconds) |gp| {{\n", .{});
+        try writer.print("                if (first_query) {{ try url_w.writeByte('?'); first_query = false; }} else {{ try url_w.writeByte('&'); }}\n", .{});
+        try writer.print("                try url_w.print(\"gracePeriodSeconds={{d}}\", .{{gp}});\n", .{});
+        try writer.print("            }}\n", .{});
+        try writer.print("        }}\n", .{});
+
+        try writer.print("        if (@hasField(@TypeOf(body), \"propagationPolicy\")) {{\n", .{});
+        try writer.print("            if (body.propagationPolicy) |pp| {{\n", .{});
+        try writer.print("                if (first_query) {{ try url_w.writeByte('?'); first_query = false; }} else {{ try url_w.writeByte('&'); }}\n", .{});
+        try writer.print("                try url_w.print(\"propagationPolicy={{s}}\", .{{pp}});\n", .{});
+        try writer.print("            }}\n", .{});
+        try writer.print("        }}\n", .{});
+
+        try writer.print("        if (@hasField(@TypeOf(body), \"dryRun\")) {{\n", .{});
+        try writer.print("            if (body.dryRun) |dr| {{\n", .{});
+        try writer.print("                for (dr) |d| {{\n", .{});
+        try writer.print("                    if (first_query) {{ try url_w.writeByte('?'); first_query = false; }} else {{ try url_w.writeByte('&'); }}\n", .{});
+        try writer.print("                    try url_w.print(\"dryRun={{s}}\", .{{d}});\n", .{});
+        try writer.print("                }}\n", .{});
+        try writer.print("            }}\n", .{});
+        try writer.print("        }}\n", .{});
+    }
+
     try writer.print("    var extra_headers = std.ArrayListUnmanaged(std.http.Header){{}};\n", .{});
     try writer.print("    defer extra_headers.deinit(self.allocator);\n", .{});
 
@@ -1472,7 +1503,7 @@ fn generateOperation(op: std.json.Value, path_item: std.json.Value, path: []cons
     try writer.print("            .location = .{{ .uri = try std.Uri.parse(url) }},\n", .{});
     try writer.print("            .method = .{s}, // Use format specifier for method\n", .{method_upper});
     try writer.print("            .extra_headers = extra_headers.items,\n", .{});
-    try writer.print("            .payload = if (req_body_writer.writer.end > 0) req_body_writer.writer.buffer[0..req_body_writer.writer.end] else null,\n", .{});
+    try writer.print("            .payload = if (!std.mem.eql(u8, \"{s}\", \"DELETE\") and req_body_writer.writer.end > 0) req_body_writer.writer.buffer[0..req_body_writer.writer.end] else null,\n", .{method_upper});
     try writer.print("            .response_writer = &ctx.writer,\n", .{});
     try writer.print("        }});\n", .{});
     try writer.print("        \n", .{});
