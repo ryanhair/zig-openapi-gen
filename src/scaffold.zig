@@ -69,6 +69,11 @@ pub fn generateProject(allocator: std.mem.Allocator, spec_source: []const u8, ou
         std.debug.print("Warning: Failed to update fingerprint: {}\n", .{err});
         std.debug.print("You may need to run 'zig build' and update build.zig.zon manually.\n", .{});
     };
+
+    // 7. Format code
+    formatProject(allocator, output_dir_path) catch |err| {
+        std.debug.print("Warning: Failed to format code: {}\n", .{err});
+    };
 }
 
 pub fn generateCI(output_dir_path: []const u8) !void {
@@ -161,6 +166,11 @@ pub fn updateProject(allocator: std.mem.Allocator) !void {
     };
 
     ui.printInfo("Client updated successfully!", .{});
+
+    // 5. Format code
+    formatProject(allocator, ".") catch |err| {
+        std.debug.print("Warning: Failed to format code: {}\n", .{err});
+    };
 }
 
 fn fixFingerprint(allocator: std.mem.Allocator, project_path: []const u8) !void {
@@ -475,3 +485,14 @@ const readme_template =
     \\}
     \\```
 ;
+
+fn formatProject(allocator: std.mem.Allocator, project_path: []const u8) !void {
+    const argv = [_][]const u8{ "zig", "fmt", "." };
+    var child = std.process.Child.init(&argv, allocator);
+    child.cwd = project_path;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+
+    try child.spawn();
+    _ = try child.wait();
+}

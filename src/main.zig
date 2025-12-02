@@ -3,6 +3,7 @@ const parser = @import("parser.zig");
 const generator = @import("generator.zig");
 const cli = @import("cli.zig");
 const scaffold = @import("scaffold.zig");
+const fetch = @import("fetch.zig");
 const ui = @import("ui.zig");
 
 pub fn main() !void {
@@ -47,14 +48,8 @@ pub fn main() !void {
 }
 
 fn handleGenerate(allocator: std.mem.Allocator, input_path: []const u8, output_dir_path: []const u8) !void {
-    const file = try std.fs.cwd().openFile(input_path, .{});
-    defer file.close();
-
-    const file_size = (try file.stat()).size;
-    const buffer = try allocator.alloc(u8, file_size);
+    const buffer = try fetch.fetchSpec(allocator, input_path);
     defer allocator.free(buffer);
-
-    _ = try file.readAll(buffer);
 
     const parsed = try parser.parse(allocator, buffer);
     defer parsed.deinit();

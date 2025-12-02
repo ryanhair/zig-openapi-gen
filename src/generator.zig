@@ -182,6 +182,16 @@ fn generateNamespace(ns: *Namespace, parent_dir: std.fs.Dir, name: []const u8, d
 fn generateSchema(name: []const u8, schema: std.json.Value, writer: anytype, depth: usize, allocator: std.mem.Allocator, spec: std.json.Value) !void {
     if (schema != .object) return;
 
+    // Special handling for IntOrString and Patch
+    if (std.mem.eql(u8, name, "IntOrString")) {
+        try writer.print("pub const {f} = std.json.Value;\n\n", .{std.zig.fmtId(name)});
+        return;
+    }
+    if (std.mem.eql(u8, name, "Patch")) {
+        try writer.print("pub const {f} = std.json.Value;\n\n", .{std.zig.fmtId(name)});
+        return;
+    }
+
     if (schema.object.get("enum")) |_| {
         try generateEnum(name, schema, writer);
         return;
@@ -745,6 +755,79 @@ fn generateClient(spec: std.json.Value, writer: anytype, allocator: std.mem.Allo
     try writer.print("    base_url_owned: ?[]const u8 = null,\n", .{});
     try writer.print("    auth_config: AuthConfig,\n\n", .{});
 
+    try writer.writeAll(
+        \\    pub fn WatchEvent(comptime T: type) type {
+        \\        return struct {
+        \\            type: []const u8,
+        \\            object: T,
+        \\        };
+        \\    }
+        \\
+        \\    pub fn WatchStream(comptime T: type) type {
+        \\        return struct {
+        \\            allocator: std.mem.Allocator,
+        \\            req: *std.http.Client.Request,
+        \\            transfer_buf: []u8,
+        \\            reader: *std.io.Reader,
+        \\            current_line: ?[]u8 = null,
+        \\            current_parsed: ?std.json.Parsed(WatchEvent(T)) = null,
+        \\
+        \\            const Self = @This();
+        \\
+        \\            pub fn deinit(self: *@This()) void {
+        \\                if (self.current_parsed) |*p| p.deinit();
+        \\                if (self.current_line) |l| self.allocator.free(l);
+        \\                self.req.deinit();
+        \\                self.allocator.destroy(self.req);
+        \\                self.allocator.free(self.transfer_buf);
+        \\            }
+        \\
+        \\            fn readLine(self: *@This()) !?[]u8 {
+        \\                var result = std.ArrayListUnmanaged(u8){};
+        \\                errdefer result.deinit(self.allocator);
+        \\                while (true) {
+        \\                    const buffered = self.reader.buffer[self.reader.seek..self.reader.end];
+        \\                    if (std.mem.indexOfScalar(u8, buffered, '\n')) |idx| {
+        \\                        try result.appendSlice(self.allocator, buffered[0..idx]);
+        \\                        self.reader.seek += idx + 1;
+        \\                        return try result.toOwnedSlice(self.allocator);
+        \\                    }
+        \\                    try result.appendSlice(self.allocator, buffered);
+        \\                    self.reader.seek = self.reader.end;
+        \\                    self.reader.fillMore() catch |err| switch (err) {
+        \\                        error.EndOfStream => {
+        \\                            if (result.items.len > 0) return try result.toOwnedSlice(self.allocator);
+        \\                            return null;
+        \\                        },
+        \\                        else => return err,
+        \\                    };
+        \\                }
+        \\            }
+        \\
+        \\            pub fn next(self: *@This()) !?WatchEvent(T) {
+        \\                if (self.current_parsed) |*p| {
+        \\                    p.deinit();
+        \\                    self.current_parsed = null;
+        \\                }
+        \\                if (self.current_line) |l| {
+        \\                    self.allocator.free(l);
+        \\                    self.current_line = null;
+        \\                }
+        \\
+        \\                const line = try self.readLine();
+        \\                if (line) |l| {
+        \\                    self.current_line = l;
+        \\                    const parsed = try std.json.parseFromSlice(WatchEvent(T), self.allocator, l, .{ .ignore_unknown_fields = true });
+        \\                    self.current_parsed = parsed;
+        \\                    return parsed.value;
+        \\                }
+        \\                return null;
+        \\            }
+        \\        };
+        \\    }
+        \\
+    );
+
     try writer.print("    pub fn init(allocator: std.mem.Allocator, auth_config: AuthConfig, options: anytype) !Client {{\n", .{});
     try writer.print("        var base_url: []const u8 = \"\";\n", .{});
     try writer.print("        var base_url_owned: ?[]const u8 = null;\n", .{});
@@ -927,6 +1010,8 @@ fn generateOperation(op: std.json.Value, path_item: std.json.Value, path: []cons
     var body_type: ?[]const u8 = null;
     var content_type: []const u8 = "application/json";
     var swagger_body_param_name: ?[]const u8 = null;
+    var supports_watch = false;
+    var watch_item_type: ?[]const u8 = null;
 
     if (op.object.get("requestBody")) |rb_val| {
         var rb = rb_val;
@@ -1160,7 +1245,11 @@ fn generateOperation(op: std.json.Value, path_item: std.json.Value, path: []cons
         if (param.object.get("in")) |in_val| {
             if (std.mem.eql(u8, in_val.string, "query")) {
                 has_query_params = true;
-                break;
+                if (param.object.get("name")) |n| {
+                    if (std.mem.eql(u8, n.string, "watch")) {
+                        supports_watch = true;
+                    }
+                }
             }
         }
     }
@@ -1424,6 +1513,25 @@ fn generateOperation(op: std.json.Value, path_item: std.json.Value, path: []cons
             if (resp.object.get("schema")) |schema| {
                 if (schema.object.get("$ref")) |ref| {
                     resp_body_type = try resolveRef(ref.string, 0, arena_allocator);
+                    if (supports_watch) {
+                        if (resolveSchema(spec, ref.string)) |resolved_schema| {
+                            if (resolved_schema.object.get("properties")) |props| {
+                                if (props.object.get("items")) |items_prop| {
+                                    if (items_prop.object.get("type")) |t| {
+                                        if (std.mem.eql(u8, t.string, "array")) {
+                                            if (items_prop.object.get("items")) |items_schema| {
+                                                if (items_schema.object.get("$ref")) |item_ref| {
+                                                    watch_item_type = try resolveRef(item_ref.string, 0, arena_allocator);
+                                                } else if (items_schema.object.get("type")) |item_t| {
+                                                    watch_item_type = try mapType(item_t.string);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 } else if (schema.object.get("type")) |t| {
                     resp_body_type = try mapType(t.string);
                     if (std.mem.eql(u8, t.string, "array")) {
@@ -1431,6 +1539,7 @@ fn generateOperation(op: std.json.Value, path_item: std.json.Value, path: []cons
                             if (items.object.get("$ref")) |ref| {
                                 const item_type = try resolveRef(ref.string, 0, arena_allocator);
                                 resp_body_type = try std.fmt.allocPrint(arena_allocator, "[]const {s}", .{item_type});
+                                watch_item_type = item_type;
                             } else if (items.object.get("type")) |it| {
                                 const item_type = try mapType(it.string);
                                 resp_body_type = try std.fmt.allocPrint(arena_allocator, "[]const {s}", .{item_type});
@@ -1476,6 +1585,124 @@ fn generateOperation(op: std.json.Value, path_item: std.json.Value, path: []cons
 
     try writer.print("        }}\n", .{});
     try writer.print("    }}\n\n", .{});
+
+    if (supports_watch and watch_item_type != null) {
+        try writer.print("\n    pub fn watch{f}(self: *Client", .{std.zig.fmtId(op_id)});
+        for (resolved_params.items, 0..) |param, param_idx| {
+            if (param.object.get("name")) |name_val| {
+                const name = name_val.string;
+                if (std.mem.eql(u8, name, "watch")) continue; // Skip watch param
+
+                const zig_name = param_names.items[param_idx];
+                var type_str: []const u8 = "[]const u8";
+                if (param.object.get("schema")) |s| {
+                    if (s.object.get("type")) |t| {
+                        type_str = try mapType(t.string);
+                    } else if (s.object.get("$ref")) |ref| {
+                        type_str = try resolveRef(ref.string, 0, arena_allocator);
+                    }
+                }
+                
+                if (param.object.get("required")) |req| {
+                    if (req == .bool and req.bool) {
+                        try writer.print(", {f}: {s}", .{std.zig.fmtId(zig_name), type_str});
+                    } else {
+                        try writer.print(", {f}: ?{s}", .{std.zig.fmtId(zig_name), type_str});
+                    }
+                } else {
+                    try writer.print(", {f}: ?{s}", .{std.zig.fmtId(zig_name), type_str});
+                }
+            }
+        }
+        try writer.print(") !WatchStream({s}) {{\n", .{watch_item_type.?});
+
+        // URL Construction
+        try writer.print("        var url_buf: [4096]u8 = undefined;\n", .{});
+        try writer.print("        var url_fbs = std.io.fixedBufferStream(&url_buf);\n", .{});
+        try writer.print("        const url_w = url_fbs.writer();\n", .{});
+        try writer.print("        try url_w.print(\"{{s}}\", .{{ self.base_url }});\n", .{});
+
+        var path_idx: usize = 0;
+        while (path_idx < path.len) {
+            if (path[path_idx] == '{') {
+                if (std.mem.indexOfPos(u8, path, path_idx, "}") != null) {
+                     const e = std.mem.indexOfPos(u8, path, path_idx, "}").?;
+                    const param_name = path[path_idx + 1 .. e];
+                    var zig_param_name: []const u8 = "unknown";
+                    var fmt_spec: []const u8 = "{any}";
+                    for (resolved_params.items, 0..) |p, idx| {
+                        if (p.object.get("name")) |n| {
+                            if (std.mem.eql(u8, n.string, param_name)) {
+                                zig_param_name = param_names.items[idx];
+                                if (p.object.get("schema")) |s| {
+                                    if (s.object.get("type")) |t| {
+                                        if (std.mem.eql(u8, t.string, "string")) fmt_spec = "{s}";
+                                        if (std.mem.eql(u8, t.string, "integer")) fmt_spec = "{d}";
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    try writer.print("        try url_w.print(\"{s}\", .{{ {f} }});\n", .{fmt_spec, std.zig.fmtId(zig_param_name)});
+                    path_idx = e + 1;
+                } else {
+                    try writer.writeAll("        try url_w.writeAll(\"{\");\n");
+                    path_idx += 1;
+                }
+            } else {
+                const end = std.mem.indexOfPos(u8, path, path_idx, "{") orelse path.len;
+                try writer.print("        try url_w.writeAll(\"{s}\");\n", .{path[path_idx..end]});
+                path_idx = end;
+            }
+        }
+
+        // Query Params
+        try writer.writeAll("        try url_w.writeAll(\"?watch=true\");\n");
+        for (resolved_params.items, 0..) |param, idx| {
+            if (param.object.get("in")) |in_val| {
+                if (std.mem.eql(u8, in_val.string, "query")) {
+                    const name = param.object.get("name").?.string;
+                    if (std.mem.eql(u8, name, "watch")) continue; // Skip watch param
+
+                    const zig_name = param_names.items[idx];
+                    var fmt_spec: []const u8 = "{any}";
+                     if (param.object.get("schema")) |s| {
+                        if (s.object.get("type")) |t| {
+                            if (std.mem.eql(u8, t.string, "string")) fmt_spec = "{s}";
+                            if (std.mem.eql(u8, t.string, "integer")) fmt_spec = "{d}";
+                            if (std.mem.eql(u8, t.string, "boolean")) fmt_spec = "{}";
+                        }
+                    }
+
+                    if (param.object.get("required")) |req| {
+                        if (req == .bool and req.bool) {
+                             try writer.print("        try url_w.print(\"&{s}={s}\", .{{ {f} }});\n", .{name, fmt_spec, std.zig.fmtId(zig_name)});
+                        } else {
+                             try writer.print("        if ({f}) |v| try url_w.print(\"&{s}={s}\", .{{ v }});\n", .{std.zig.fmtId(zig_name), name, fmt_spec});
+                        }
+                    } else {
+                         try writer.print("        if ({f}) |v| try url_w.print(\"&{s}={s}\", .{{ v }});\n", .{std.zig.fmtId(zig_name), name, fmt_spec});
+                    }
+                }
+            }
+        }
+
+
+        try writer.print("\n", .{});
+        try writer.print("        const req = try self.client.request(.{s}, try std.Uri.parse(url_w.context.getWritten()), .{{ .headers = .{{ .content_type = .{{ .override = \"{s}\" }}, .authorization = if (@hasField(AuthConfig, \"BearerToken\")) if (self.auth_config.BearerToken) |t| .{{ .override = try std.fmt.allocPrint(self.allocator, \"Bearer {{s}}\", .{{t}}) }} else .omit else .omit }} }});\n", .{method_upper, content_type});
+        try writer.print("        const heap_req = try self.allocator.create(std.http.Client.Request);\n", .{});
+        try writer.print("        heap_req.* = req;\n", .{});
+        try writer.print("        errdefer self.allocator.destroy(heap_req);\n", .{});
+        try writer.print("        try heap_req.sendBodiless();\n", .{});
+        try writer.print("        var header_buf: [4096]u8 = undefined;\n", .{});
+        try writer.print("        var res = try heap_req.receiveHead(&header_buf);\n", .{});
+        try writer.print("        const transfer_buf = try self.allocator.alloc(u8, 4096);\n", .{});
+        try writer.print("        errdefer self.allocator.free(transfer_buf);\n", .{});
+        try writer.print("        const reader = res.reader(transfer_buf);\n", .{});
+        try writer.print("        return WatchStream({s}){{ .allocator = self.allocator, .req = heap_req, .transfer_buf = transfer_buf, .reader = reader }};\n", .{watch_item_type.?});
+        try writer.print("    }}\n\n", .{});
+    }
 }
 fn mapType(json_type: []const u8) ![]const u8 {
     if (std.mem.eql(u8, json_type, "string")) return "[]const u8";
