@@ -7,6 +7,8 @@
   "paths": {
     "/users/{id}": {
       "get": {
+        "summary": "Get a user by ID",
+        "description": "Returns a single user.\nIf not found, returns 404.",
         "operationId": "getUser",
         "parameters": [
           {
@@ -31,6 +33,16 @@
           },
           "404": {
             "description": "User not found"
+          },
+          "default": {
+            "description": "General Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
@@ -188,6 +200,7 @@
     },
     "schemas": {
       "User": {
+        "description": "Represents a registered user.",
         "type": "object",
         "properties": {
           "id": {
@@ -203,6 +216,21 @@
         "required": [
           "id",
           "username"
+        ]
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
         ]
       }
     }

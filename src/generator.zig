@@ -179,6 +179,18 @@ fn generateNamespace(ns: *Namespace, parent_dir: std.fs.Dir, name: []const u8, d
     }
 }
 
+fn printDocs(writer: anytype, object: std.json.Value, indent: []const u8) !void {
+    if (object.object.get("summary")) |summary| {
+        try writer.print("{s}/// {s}\n", .{indent, summary.string});
+    }
+    if (object.object.get("description")) |desc| {
+        var it = std.mem.splitScalar(u8, desc.string, '\n');
+        while (it.next()) |line| {
+            try writer.print("{s}/// {s}\n", .{indent, line});
+        }
+    }
+}
+
 fn generateSchema(name: []const u8, schema: std.json.Value, writer: anytype, depth: usize, allocator: std.mem.Allocator, spec: std.json.Value) !void {
     if (schema != .object) return;
 
@@ -421,6 +433,7 @@ fn generateAllOf(name: []const u8, schema: std.json.Value, writer: anytype, dept
 }
 
 fn generateStruct(name: []const u8, schema: std.json.Value, writer: anytype, depth: usize, allocator: std.mem.Allocator, spec: std.json.Value) !void {
+    try printDocs(writer, schema, "");
     try writer.print("pub const {f} = struct {{\n", .{std.zig.fmtId(name)});
     try generateStructProperties(schema, writer, depth, allocator, spec);
     try writer.print("\n    pub fn validate(self: @This()) !void {{\n", .{});
@@ -442,6 +455,7 @@ fn generateStructProperties(schema: std.json.Value, writer: anytype, depth: usiz
             const prop = prop_entry.value_ptr.*;
             if (prop != .object) continue;
 
+            try printDocs(writer, prop, "    ");
             var zig_type: []const u8 = "[]const u8";
             var is_ref = false;
             var type_buf: [256]u8 = undefined;
@@ -924,7 +938,18 @@ fn generateResponseTypes(op_id: []const u8, responses: std.json.Value, writer: a
         }
 
         var body_type: ?[]const u8 = null;
-        if (response.object.get("schema")) |schema| {
+        var schema_node: ?std.json.Value = response.object.get("schema");
+
+        // Check for OpenAPI 3.0 content structure
+        if (schema_node == null) {
+            if (response.object.get("content")) |content| {
+                if (content.object.get("application/json")) |json_content| {
+                    schema_node = json_content.object.get("schema");
+                }
+            }
+        }
+
+        if (schema_node) |schema| {
             if (schema.object.get("$ref")) |ref| {
                 body_type = try resolveRef(ref.string, 0, allocator);
             } else if (schema.object.get("type")) |t| {
@@ -979,6 +1004,17 @@ fn generateResponseTypes(op_id: []const u8, responses: std.json.Value, writer: a
         try variants.append(allocator, variant_def);
     }
 
+    // Ensure default_response exists
+    if (responses.object.get("default") == null) {
+        const struct_name = try std.fmt.allocPrint(allocator, "{s}Default", .{union_name});
+        try writer.print("    pub const {s} = struct {{\n", .{struct_name});
+        try writer.print("        body: std.json.Value,\n", .{});
+        try writer.print("        headers: []const std.http.Header,\n", .{});
+        try writer.print("        arena: std.heap.ArenaAllocator,\n", .{});
+        try writer.print("    }};\n", .{});
+        try variants.append(allocator, try std.fmt.allocPrint(allocator, "        default_response: {s},", .{struct_name}));
+    }
+
     // Generate Union
     try writer.print("    pub const {s} = union(enum) {{\n", .{union_name});
     for (variants.items) |v| {
@@ -1004,6 +1040,7 @@ fn generateOperation(op: std.json.Value, path_item: std.json.Value, path: []cons
     const union_name = try generateResponseTypes(op_id, responses.?, writer, arena_allocator, spec);
     // union_name is allocated in arena, no need to free manually
 
+    try printDocs(writer, op, "    ");
     try writer.print("    pub fn {f}(self: *Client", .{std.zig.fmtId(op_id)});
 
     // Request Body
@@ -1605,12 +1642,38 @@ fn generateOperation(op: std.json.Value, path_item: std.json.Value, path: []cons
 
     if (has_default) {
         try writer.print("                // Handle default response\n", .{});
-        // Logic for default response body... similar to above but generic?
-        // For now just return default_response with headers
-        try writer.print("                return .{{ .default_response = .{{ .headers = headers, .arena = arena }} }};\n", .{});
+        
+        // Resolve default response body type
+        var def_body_type: ?[]const u8 = null;
+        if (responses.?.object.get("default")) |def| {
+             var def_resp = def;
+            if (def.object.get("$ref")) |ref| {
+                if (resolveSchema(spec, ref.string)) |resolved| {
+                    def_resp = resolved;
+                }
+            }
+
+            if (def_resp.object.get("schema")) |schema| {
+                if (schema.object.get("$ref")) |ref| {
+                    def_body_type = try resolveRef(ref.string, 0, arena_allocator);
+                } else if (schema.object.get("type")) |t| {
+                    def_body_type = try mapType(t.string);
+                }
+            }
+        }
+
+        if (def_body_type) |bt| {
+            try writer.print("                const body_resp = try arena.allocator().dupe(u8, body_list.items);\n", .{});
+            try writer.print("                const parsed = try std.json.parseFromSliceLeaky({s}, arena.allocator(), body_resp, .{{ .ignore_unknown_fields = true }});\n", .{bt});
+            try writer.print("                return .{{ .default_response = .{{ .body = parsed, .headers = headers, .arena = arena }} }};\n", .{});
+        } else {
+            try writer.print("                return .{{ .default_response = .{{ .headers = headers, .arena = arena }} }};\n", .{});
+        }
     } else {
-        try writer.print("                std.log.warn(\"Unexpected status code: {{d}}\", .{{response.head.status}});\n", .{});
-        try writer.print("                return error.UnexpectedStatus;\n", .{});
+        // Implicit default response (fallback)
+        try writer.print("                const body_resp = try arena.allocator().dupe(u8, body_list.items);\n", .{});
+        try writer.print("                const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), body_resp, .{{ .ignore_unknown_fields = true }});\n", .{});
+        try writer.print("                return .{{ .default_response = .{{ .body = parsed, .headers = headers, .arena = arena }} }};\n", .{});
     }
     try writer.print("            }}\n", .{});
 
