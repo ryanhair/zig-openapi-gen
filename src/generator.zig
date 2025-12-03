@@ -181,12 +181,12 @@ fn generateNamespace(ns: *Namespace, parent_dir: std.fs.Dir, name: []const u8, d
 
 fn printDocs(writer: anytype, object: std.json.Value, indent: []const u8) !void {
     if (object.object.get("summary")) |summary| {
-        try writer.print("{s}/// {s}\n", .{indent, summary.string});
+        try writer.print("{s}/// {s}\n", .{ indent, summary.string });
     }
     if (object.object.get("description")) |desc| {
         var it = std.mem.splitScalar(u8, desc.string, '\n');
         while (it.next()) |line| {
-            try writer.print("{s}/// {s}\n", .{indent, line});
+            try writer.print("{s}/// {s}\n", .{ indent, line });
         }
     }
 }
@@ -1040,9 +1040,6 @@ fn generateOperation(op: std.json.Value, path_item: std.json.Value, path: []cons
     const union_name = try generateResponseTypes(op_id, responses.?, writer, arena_allocator, spec);
     // union_name is allocated in arena, no need to free manually
 
-    try printDocs(writer, op, "    ");
-    try writer.print("    pub fn {f}(self: *Client", .{std.zig.fmtId(op_id)});
-
     // Request Body
     var body_type: ?[]const u8 = null;
     var content_type: []const u8 = "application/json";
@@ -1225,24 +1222,56 @@ fn generateOperation(op: std.json.Value, path_item: std.json.Value, path: []cons
         }
     }
 
+    var required_params = std.ArrayListUnmanaged(usize){};
+    var optional_params = std.ArrayListUnmanaged(usize){};
+
     for (resolved_params.items, 0..) |param, i| {
         if (param.object.get("name")) |name_val| {
             const name = name_val.string;
-            const zig_name = param_names.items[i];
-
-            // Skip if this is the Swagger body param (we handle it separately)
+            // Skip special body params
             if (swagger_body_param_name) |bp_name| {
                 if (std.mem.eql(u8, name, bp_name)) continue;
             }
-            // Skip if this is "body" and we have a requestBody (OpenAPI 3)
             if (op.object.get("requestBody") != null and std.mem.eql(u8, name, "body")) continue;
 
+            var is_required = false;
+            if (param.object.get("required")) |req| {
+                if (req == .bool and req.bool) is_required = true;
+            }
+            if (param.object.get("in")) |in_val| {
+                if (std.mem.eql(u8, in_val.string, "path")) is_required = true;
+            }
+
+            if (is_required) {
+                try required_params.append(arena_allocator, i);
+            } else {
+                try optional_params.append(arena_allocator, i);
+            }
+        }
+    }
+
+    // Generate Options Struct
+    var options_struct_name: []const u8 = undefined;
+    if (optional_params.items.len > 0) {
+        // Sanitize op_id for struct name
+        const clean_op_id = try toCamelCase(arena_allocator, op_id);
+        // Capitalize first letter for struct name convention (PascalCase)
+        // (Optional, but good practice. toCamelCase returns camelCase)
+        // For now, just append Options.
+        options_struct_name = try std.fmt.allocPrint(arena_allocator, "{s}Options", .{clean_op_id});
+
+        try writer.print("    pub const {f} = struct {{\n", .{std.zig.fmtId(options_struct_name)});
+        for (optional_params.items) |idx| {
+            const param = resolved_params.items[idx];
+            const zig_name = param_names.items[idx];
+
+            try printDocs(writer, param, "        ");
+
             const schema = param.object.get("schema");
+            var zig_type: []const u8 = "[]const u8";
             if (schema != null and schema.? == .object) {
-                var zig_type: []const u8 = "[]const u8";
                 if (schema.?.object.get("$ref")) |ref| {
-                    zig_type = try resolveRef(ref.string, 0, arena_allocator); // Depth 0 for root
-                    try writer.print(", {f}: {s}", .{ std.zig.fmtId(zig_name), zig_type });
+                    zig_type = try resolveRef(ref.string, 0, arena_allocator);
                 } else {
                     if (schema.?.object.get("type")) |t| {
                         zig_type = try mapType(t.string);
@@ -1258,13 +1287,43 @@ fn generateOperation(op: std.json.Value, path_item: std.json.Value, path: []cons
                             }
                         }
                     }
-                    try writer.print(", {f}: {s}", .{ std.zig.fmtId(zig_name), zig_type });
                 }
+            }
+            try writer.print("        {f}: ?{s} = null,\n", .{ std.zig.fmtId(zig_name), zig_type });
+        }
+        try writer.print("    }};\n", .{});
+    }
+
+    try printDocs(writer, op, "    ");
+    try writer.print("    pub fn {f}(self: *Client", .{std.zig.fmtId(op_id)});
+
+    // Generate Function Signature
+    for (required_params.items) |idx| {
+        const param = resolved_params.items[idx];
+        const zig_name = param_names.items[idx];
+        const schema = param.object.get("schema");
+        var zig_type: []const u8 = "[]const u8";
+        if (schema != null and schema.? == .object) {
+            if (schema.?.object.get("$ref")) |ref| {
+                zig_type = try resolveRef(ref.string, 0, arena_allocator);
             } else {
-                // Default to string if no schema
-                try writer.print(", {f}: []const u8", .{std.zig.fmtId(zig_name)});
+                if (schema.?.object.get("type")) |t| {
+                    zig_type = try mapType(t.string);
+                    if (std.mem.eql(u8, t.string, "array")) {
+                        if (schema.?.object.get("items")) |items| {
+                            if (items.object.get("$ref")) |ref| {
+                                const item_type = try resolveRef(ref.string, 0, arena_allocator);
+                                zig_type = try std.fmt.allocPrint(arena_allocator, "[]const {s}", .{item_type});
+                            } else if (items.object.get("type")) |it| {
+                                const item_type = try mapType(it.string);
+                                zig_type = try std.fmt.allocPrint(arena_allocator, "[]const {s}", .{item_type});
+                            }
+                        }
+                    }
+                }
             }
         }
+        try writer.print(", {f}: {s}", .{ std.zig.fmtId(zig_name), zig_type });
     }
 
     if (body_type) |bt| {
@@ -1273,6 +1332,10 @@ fn generateOperation(op: std.json.Value, path_item: std.json.Value, path: []cons
         if (body_type) |bt| {
             try writer.print(", {f}: {s}", .{ std.zig.fmtId(bp_name), bt });
         }
+    }
+
+    if (optional_params.items.len > 0) {
+        try writer.print(", options: {f}", .{std.zig.fmtId(options_struct_name)});
     }
 
     try writer.print(") !{s} {{\n", .{union_name});
@@ -1373,6 +1436,15 @@ fn generateOperation(op: std.json.Value, path_item: std.json.Value, path: []cons
             if (in_val != null) {
                 if (std.mem.eql(u8, in_val.?.string, "query")) {
                     const zig_name = param_names.items[idx];
+                    const is_optional = for (optional_params.items) |opt_idx| {
+                        if (opt_idx == idx) break true;
+                    } else false;
+
+                    const var_name = if (is_optional) "val" else zig_name;
+
+                    if (is_optional) {
+                        try writer.print("        if (options.{f}) |val| {{\n", .{std.zig.fmtId(zig_name)});
+                    }
 
                     const schema = param.object.get("schema");
                     if (schema != null) {
@@ -1386,20 +1458,25 @@ fn generateOperation(op: std.json.Value, path_item: std.json.Value, path: []cons
                         }
 
                         if (is_string_prim) {
-                            try writer.print("        if ({f}.len > 0) {{\n", .{std.zig.fmtId(zig_name)});
-                            try writer.print("            if (first_query) {{ try url_w.writeByte('?'); first_query = false; }} else {{ try url_w.writeByte('&'); }}\n", .{});
-                            try writer.print("            try url_w.print(\"{s}=\", .{{}});\n", .{name});
-                            try writer.print("            try urlEncode(url_w, {f});\n", .{std.zig.fmtId(zig_name)});
-                            try writer.print("        }}\n", .{});
+                            try writer.print("            if ({f}.len > 0) {{\n", .{std.zig.fmtId(var_name)});
+                            try writer.print("                if (first_query) {{ try url_w.writeByte('?'); first_query = false; }} else {{ try url_w.writeByte('&'); }}\n", .{});
+                            try writer.print("                try url_w.print(\"{s}=\", .{{}});\n", .{name});
+                            try writer.print("                try urlEncode(url_w, {f});\n", .{std.zig.fmtId(var_name)});
+                            try writer.print("            }}\n", .{});
                         } else {
-                            try writer.print("        try url_w.print(\"{s}={{{s}}}\", .{{ {f} }});\n", .{ name, fmt, std.zig.fmtId(zig_name) });
+                            try writer.print("            if (first_query) {{ try url_w.writeByte('?'); first_query = false; }} else {{ try url_w.writeByte('&'); }}\n", .{});
+                            try writer.print("            try url_w.print(\"{s}={{{s}}}\", .{{ {f} }});\n", .{ name, fmt, std.zig.fmtId(var_name) });
                         }
                     } else {
                         // No schema, treat as string
-                        try writer.print("        if ({f}.len > 0) {{\n", .{std.zig.fmtId(zig_name)});
-                        try writer.print("            if (first_query) {{ try url_w.writeByte('?'); first_query = false; }} else {{ try url_w.writeByte('&'); }}\n", .{});
-                        try writer.print("            try url_w.print(\"{s}=\", .{{}});\n", .{name});
-                        try writer.print("            try urlEncode(url_w, {f});\n", .{std.zig.fmtId(zig_name)});
+                        try writer.print("            if ({f}.len > 0) {{\n", .{std.zig.fmtId(var_name)});
+                        try writer.print("                if (first_query) {{ try url_w.writeByte('?'); first_query = false; }} else {{ try url_w.writeByte('&'); }}\n", .{});
+                        try writer.print("                try url_w.print(\"{s}=\", .{{}});\n", .{name});
+                        try writer.print("                try urlEncode(url_w, {f});\n", .{std.zig.fmtId(var_name)});
+                        try writer.print("            }}\n", .{});
+                    }
+
+                    if (is_optional) {
                         try writer.print("        }}\n", .{});
                     }
                 }
@@ -1493,14 +1570,22 @@ fn generateOperation(op: std.json.Value, path_item: std.json.Value, path: []cons
             const name = name_val.string;
             const in_val = param.object.get("in");
             if (in_val != null) {
+                const zig_name = param_names.items[idx];
+                const is_optional = for (optional_params.items) |opt_idx| {
+                    if (opt_idx == idx) break true;
+                } else false;
+                const var_name = if (is_optional) "val" else zig_name;
+
                 if (std.mem.eql(u8, in_val.?.string, "header")) {
-                    const zig_name = param_names.items[idx];
-                    try writer.print("        try extra_headers.append(self.allocator, .{{ .name = \"{s}\", .value = {f} }});\n", .{ name, std.zig.fmtId(zig_name) });
+                    if (is_optional) try writer.print("        if (options.{f}) |val| {{\n", .{std.zig.fmtId(zig_name)});
+                    try writer.print("            try extra_headers.append(self.allocator, .{{ .name = \"{s}\", .value = {f} }});\n", .{ name, std.zig.fmtId(var_name) });
+                    if (is_optional) try writer.print("        }}\n", .{});
                 } else if (std.mem.eql(u8, in_val.?.string, "cookie")) {
-                    const zig_name = param_names.items[idx];
-                    try writer.print("        var cookie_buf: [256]u8 = undefined;\n", .{});
-                    try writer.print("        const cookie_val = try std.fmt.bufPrint(&cookie_buf, \"{s}={{s}}\", .{{ {f} }});\n", .{ name, std.zig.fmtId(zig_name) });
-                    try writer.print("        try extra_headers.append(self.allocator, .{{ .name = \"Cookie\", .value = cookie_val }});\n", .{});
+                    if (is_optional) try writer.print("        if (options.{f}) |val| {{\n", .{std.zig.fmtId(zig_name)});
+                    try writer.print("            var cookie_buf: [256]u8 = undefined;\n", .{});
+                    try writer.print("            const cookie_val = try std.fmt.bufPrint(&cookie_buf, \"{s}={{s}}\", .{{ {f} }});\n", .{ name, std.zig.fmtId(var_name) });
+                    try writer.print("            try extra_headers.append(self.allocator, .{{ .name = \"Cookie\", .value = cookie_val }});\n", .{});
+                    if (is_optional) try writer.print("        }}\n", .{});
                 }
             }
         }
@@ -1517,7 +1602,7 @@ fn generateOperation(op: std.json.Value, path_item: std.json.Value, path: []cons
         try writer.print("        try std.json.Stringify.value(body, .{{}}, &req_body_writer.writer);\n", .{});
     } else if (swagger_body_param_name) |bp_name| {
         const camel_bp_name = try toCamelCase(arena_allocator, bp_name);
-        try writer.print("        if (@hasDecl(@TypeOf({f}), \"validate\")) try {f}.validate();\n", .{std.zig.fmtId(camel_bp_name), std.zig.fmtId(camel_bp_name)});
+        try writer.print("        if (@hasDecl(@TypeOf({f}), \"validate\")) try {f}.validate();\n", .{ std.zig.fmtId(camel_bp_name), std.zig.fmtId(camel_bp_name) });
         try writer.print("        try std.json.Stringify.value({f}, .{{}}, &req_body_writer.writer);\n", .{std.zig.fmtId(camel_bp_name)});
     }
 
@@ -1642,11 +1727,11 @@ fn generateOperation(op: std.json.Value, path_item: std.json.Value, path: []cons
 
     if (has_default) {
         try writer.print("                // Handle default response\n", .{});
-        
+
         // Resolve default response body type
         var def_body_type: ?[]const u8 = null;
         if (responses.?.object.get("default")) |def| {
-             var def_resp = def;
+            var def_resp = def;
             if (def.object.get("$ref")) |ref| {
                 if (resolveSchema(spec, ref.string)) |resolved| {
                     def_resp = resolved;
@@ -1682,31 +1767,22 @@ fn generateOperation(op: std.json.Value, path_item: std.json.Value, path: []cons
 
     if (supports_watch and watch_item_type != null) {
         try writer.print("\n    pub fn watch{f}(self: *Client", .{std.zig.fmtId(op_id)});
-        for (resolved_params.items, 0..) |param, param_idx| {
-            if (param.object.get("name")) |name_val| {
-                const name = name_val.string;
-                if (std.mem.eql(u8, name, "watch")) continue; // Skip watch param
-
-                const zig_name = param_names.items[param_idx];
-                var type_str: []const u8 = "[]const u8";
-                if (param.object.get("schema")) |s| {
-                    if (s.object.get("type")) |t| {
-                        type_str = try mapType(t.string);
-                    } else if (s.object.get("$ref")) |ref| {
-                        type_str = try resolveRef(ref.string, 0, arena_allocator);
-                    }
-                }
-                
-                if (param.object.get("required")) |req| {
-                    if (req == .bool and req.bool) {
-                        try writer.print(", {f}: {s}", .{std.zig.fmtId(zig_name), type_str});
-                    } else {
-                        try writer.print(", {f}: ?{s}", .{std.zig.fmtId(zig_name), type_str});
-                    }
-                } else {
-                    try writer.print(", {f}: ?{s}", .{std.zig.fmtId(zig_name), type_str});
+        for (required_params.items) |idx| {
+            const param = resolved_params.items[idx];
+            const zig_name = param_names.items[idx];
+            var type_str: []const u8 = "[]const u8";
+            if (param.object.get("schema")) |s| {
+                if (s.object.get("type")) |t| {
+                    type_str = try mapType(t.string);
+                } else if (s.object.get("$ref")) |ref| {
+                    type_str = try resolveRef(ref.string, 0, arena_allocator);
                 }
             }
+            try writer.print(", {f}: {s}", .{ std.zig.fmtId(zig_name), type_str });
+        }
+
+        if (optional_params.items.len > 0) {
+            try writer.print(", options: {f}", .{std.zig.fmtId(options_struct_name)});
         }
         try writer.print(") !WatchStream({s}) {{\n", .{watch_item_type.?});
 
@@ -1720,7 +1796,7 @@ fn generateOperation(op: std.json.Value, path_item: std.json.Value, path: []cons
         while (path_idx < path.len) {
             if (path[path_idx] == '{') {
                 if (std.mem.indexOfPos(u8, path, path_idx, "}") != null) {
-                     const e = std.mem.indexOfPos(u8, path, path_idx, "}").?;
+                    const e = std.mem.indexOfPos(u8, path, path_idx, "}").?;
                     const param_name = path[path_idx + 1 .. e];
                     var zig_param_name: []const u8 = "unknown";
                     var fmt_spec: []const u8 = "{any}";
@@ -1738,7 +1814,7 @@ fn generateOperation(op: std.json.Value, path_item: std.json.Value, path: []cons
                             }
                         }
                     }
-                    try writer.print("        try url_w.print(\"{s}\", .{{ {f} }});\n", .{fmt_spec, std.zig.fmtId(zig_param_name)});
+                    try writer.print("        try url_w.print(\"{s}\", .{{ {f} }});\n", .{ fmt_spec, std.zig.fmtId(zig_param_name) });
                     path_idx = e + 1;
                 } else {
                     try writer.writeAll("        try url_w.writeAll(\"{\");\n");
@@ -1760,8 +1836,13 @@ fn generateOperation(op: std.json.Value, path_item: std.json.Value, path: []cons
                     if (std.mem.eql(u8, name, "watch")) continue; // Skip watch param
 
                     const zig_name = param_names.items[idx];
+                    const is_optional = for (optional_params.items) |opt_idx| {
+                        if (opt_idx == idx) break true;
+                    } else false;
+                    const var_name = if (is_optional) "val" else zig_name;
+
                     var fmt_spec: []const u8 = "{any}";
-                     if (param.object.get("schema")) |s| {
+                    if (param.object.get("schema")) |s| {
                         if (s.object.get("type")) |t| {
                             if (std.mem.eql(u8, t.string, "string")) fmt_spec = "{s}";
                             if (std.mem.eql(u8, t.string, "integer")) fmt_spec = "{d}";
@@ -1769,22 +1850,19 @@ fn generateOperation(op: std.json.Value, path_item: std.json.Value, path: []cons
                         }
                     }
 
-                    if (param.object.get("required")) |req| {
-                        if (req == .bool and req.bool) {
-                             try writer.print("        try url_w.print(\"&{s}={s}\", .{{ {f} }});\n", .{name, fmt_spec, std.zig.fmtId(zig_name)});
-                        } else {
-                             try writer.print("        if ({f}) |v| try url_w.print(\"&{s}={s}\", .{{ v }});\n", .{std.zig.fmtId(zig_name), name, fmt_spec});
-                        }
+                    if (is_optional) {
+                        try writer.print("        if (options.{f}) |val| {{\n", .{std.zig.fmtId(zig_name)});
+                        try writer.print("            try url_w.print(\"&{s}={s}\", .{{ {f} }});\n", .{ name, fmt_spec, std.zig.fmtId(var_name) });
+                        try writer.print("        }}\n", .{});
                     } else {
-                         try writer.print("        if ({f}) |v| try url_w.print(\"&{s}={s}\", .{{ v }});\n", .{std.zig.fmtId(zig_name), name, fmt_spec});
+                        try writer.print("        try url_w.print(\"&{s}={s}\", .{{ {f} }});\n", .{ name, fmt_spec, std.zig.fmtId(var_name) });
                     }
                 }
             }
         }
 
-
         try writer.print("\n", .{});
-        try writer.print("        const req = try self.client.request(.{s}, try std.Uri.parse(url_w.context.getWritten()), .{{ .headers = .{{ .content_type = .{{ .override = \"{s}\" }}, .authorization = if (@hasField(AuthConfig, \"BearerToken\")) if (self.auth_config.BearerToken) |t| .{{ .override = try std.fmt.allocPrint(self.allocator, \"Bearer {{s}}\", .{{t}}) }} else .omit else .omit }} }});\n", .{method_upper, content_type});
+        try writer.print("        const req = try self.client.request(.{s}, try std.Uri.parse(url_w.context.getWritten()), .{{ .headers = .{{ .content_type = .{{ .override = \"{s}\" }}, .authorization = if (@hasField(AuthConfig, \"BearerToken\")) if (self.auth_config.BearerToken) |t| .{{ .override = try std.fmt.allocPrint(self.allocator, \"Bearer {{s}}\", .{{t}}) }} else .omit else .omit }} }});\n", .{ method_upper, content_type });
         try writer.print("        const heap_req = try self.allocator.create(std.http.Client.Request);\n", .{});
         try writer.print("        heap_req.* = req;\n", .{});
         try writer.print("        errdefer self.allocator.destroy(heap_req);\n", .{});

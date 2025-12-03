@@ -52,7 +52,7 @@ pub fn build(b: *std.Build) void {
     });
     e2e_tests.step.dependOn(gen_simple_step);
     e2e_tests.step.dependOn(gen_advanced_step);
-    
+
     e2e_tests.root_module.addImport("simple", simple_mod);
     e2e_tests.root_module.addImport("advanced", advanced_mod);
 

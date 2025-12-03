@@ -153,10 +153,10 @@ pub fn updateProject(allocator: std.mem.Allocator) !void {
         defer allocator.free(new_version);
 
         if (!std.mem.eql(u8, current_version, new_version)) {
-             try updateBuildZigZon(allocator, ".", new_version);
-             ui.printInfo("Updated version: {s} -> {s}", .{current_version, new_version});
+            try updateBuildZigZon(allocator, ".", new_version);
+            ui.printInfo("Updated version: {s} -> {s}", .{ current_version, new_version });
         } else {
-             ui.printInfo("Version unchanged: {s}", .{current_version});
+            ui.printInfo("Version unchanged: {s}", .{current_version});
         }
     }
 
@@ -318,7 +318,7 @@ fn incrementPatchVersion(allocator: std.mem.Allocator, current_version: []const 
     const patch = it.next() orelse return error.InvalidVersion;
 
     const patch_int = try std.fmt.parseInt(u32, patch, 10);
-    return std.fmt.allocPrint(allocator, "{s}.{s}.{d}", .{major, minor, patch_int + 1});
+    return std.fmt.allocPrint(allocator, "{s}.{s}.{d}", .{ major, minor, patch_int + 1 });
 }
 
 fn writeFile(dir: std.fs.Dir, path: []const u8, content: []const u8) !void {
