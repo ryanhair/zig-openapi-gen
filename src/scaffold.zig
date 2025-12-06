@@ -39,24 +39,52 @@ pub fn generateProject(allocator: std.mem.Allocator, spec_source: []const u8, ou
         try generator.generate(allocator, parsed_spec.value, src_dir);
     }
 
-    // 4. Generate Build Files
-    try writeFile(output_dir, "build.zig", build_zig_template);
+    // 4. Generate Build Files (Safe Init)
+    const build_zig_exists = blk: {
+        std.fs.cwd().access("build.zig", .{}) catch |err| {
+            if (err == error.FileNotFound) break :blk false;
+            return err;
+        };
+        break :blk true;
+    };
 
-    // Initial build.zig.zon with dummy fingerprint
-    const dummy_fingerprint: u64 = 0;
-    const zon_content = try std.fmt.allocPrint(allocator, build_zig_zon_template, .{dummy_fingerprint});
-    defer allocator.free(zon_content);
-    try writeFile(output_dir, "build.zig.zon", zon_content);
+    if (!build_zig_exists) {
+        try writeFile(output_dir, "build.zig", build_zig_template);
 
-    try writeFile(output_dir, ".gitignore", gitignore_template);
-    try writeFile(output_dir, "README.md", readme_template);
+        // Initial build.zig.zon with dummy fingerprint
+        const dummy_fingerprint: u64 = 0;
+        const zon_content = try std.fmt.allocPrint(allocator, build_zig_zon_template, .{dummy_fingerprint});
+        defer allocator.free(zon_content);
+        try writeFile(output_dir, "build.zig.zon", zon_content);
 
-    // Generate config file
-    const config_content = try std.fmt.allocPrint(allocator, config_template, .{spec_source});
-    defer allocator.free(config_content);
-    try writeFile(output_dir, ".openapi-config.json", config_content);
+        try writeFile(output_dir, ".gitignore", gitignore_template);
+        try writeFile(output_dir, "README.md", readme_template);
 
-    std.debug.print("Project initialized in {s}\n", .{output_dir_path});
+        // Generate config file
+        const config_content = try std.fmt.allocPrint(allocator, config_template, .{spec_source});
+        defer allocator.free(config_content);
+        try writeFile(output_dir, ".openapi-config.json", config_content);
+
+        std.debug.print("Project initialized in {s}\n", .{output_dir_path});
+    } else {
+        std.debug.print("Project already initialized (build.zig exists). Skipping build file generation.\n", .{});
+        // We still might want to update config if it doesn't exist?
+        // For now let's assume if build.zig exists, it's an existing project.
+    }
+
+    // Generate Wrapper root.zig if it doesn't exist
+    const root_zig_exists = blk: {
+        src_dir.access("root.zig", .{}) catch |err| {
+            if (err == error.FileNotFound) break :blk false;
+            return err;
+        };
+        break :blk true;
+    };
+
+    if (!root_zig_exists) {
+        try writeFile(src_dir, "root.zig", root_zig_wrapper_template);
+        std.debug.print("Generated wrapper src/root.zig\n", .{});
+    }
 
     // 5. Generate CI (optional)
     if (!skip_ci) {
@@ -496,3 +524,20 @@ fn formatProject(allocator: std.mem.Allocator, project_path: []const u8) !void {
     try child.spawn();
     _ = try child.wait();
 }
+
+const root_zig_wrapper_template =
+    \\const std = @import("std");
+    \\const openapi = @import("openapi.zig");
+    \\
+    \\pub const Client = openapi.Client;
+    \\pub const Servers = openapi.Servers;
+    \\pub const AuthConfig = openapi.AuthConfig;
+    \\
+    \\// Re-export all other declarations from openapi.zig
+    \\// Note: Zig doesn't have a "export *" yet, so we rely on users importing openapi directly if they need specific schemas,
+    \\// or we can add specific exports here if needed.
+    \\// For now, let's just export the main entry points.
+    \\
+    \\// You can add your own custom code here!
+    \\
+;

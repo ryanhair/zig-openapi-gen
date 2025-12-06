@@ -58,8 +58,8 @@ pub fn generate(allocator: std.mem.Allocator, spec: std.json.Value, output_dir: 
         }
     }
 
-    // 2. Generate Root File (root.zig)
-    var root_file = try output_dir.createFile("root.zig", .{});
+    // 2. Generate Root File (openapi.zig)
+    var root_file = try output_dir.createFile("openapi.zig", .{});
     defer root_file.close();
 
     var root_buffer: [4096]u8 = undefined;
@@ -874,6 +874,151 @@ fn generateClient(spec: std.json.Value, writer: anytype, allocator: std.mem.Allo
     try writer.print("        self.client.deinit();\n", .{});
     try writer.print("        if (self.base_url_owned) |url| self.allocator.free(url);\n", .{});
     try writer.print("    }}\n\n", .{});
+    try writer.writeAll(
+        \\    pub fn request(self: *Client, method: std.http.Method, path: []const u8, options: anytype, response_type: type) !response_type {
+        \\        var url_buf: [4096]u8 = undefined;
+        \\        var url_fbs = std.io.fixedBufferStream(&url_buf);
+        \\        const url_w = url_fbs.writer();
+        \\        try url_w.print("{s}{s}", .{ self.base_url, path });
+        \\
+        \\        // Query Params
+        \\        var has_query = false;
+        \\        if (@hasField(@TypeOf(options), "query")) {
+        \\            const query = options.query;
+        \\            const fields = std.meta.fields(@TypeOf(query));
+        \\            inline for (fields) |field| {
+        \\                const val = @field(query, field.name);
+        \\                if (@typeInfo(@TypeOf(val)) == .optional) {
+        \\                    if (val) |v| {
+        \\                        if (!has_query) { try url_w.writeAll("?"); has_query = true; } else try url_w.writeAll("&");
+        \\                        try url_w.print("{s}={any}", .{ field.name, v });
+        \\                    }
+        \\                } else {
+        \\                    if (!has_query) { try url_w.writeAll("?"); has_query = true; } else try url_w.writeAll("&");
+        \\                    try url_w.print("{s}={any}", .{ field.name, val });
+        \\                }
+        \\            }
+        \\        }
+        \\
+        \\        const req_url = url_fbs.getWritten();
+        \\        const content_type = if (@hasField(@TypeOf(options), "content_type")) options.content_type else "application/json";
+        \\        
+        \\        const req_options = std.http.Client.RequestOptions{
+        \\            .headers = .{
+        \\                .content_type = .{ .override = content_type },
+        \\                .authorization = if (@hasField(AuthConfig, "BearerToken")) 
+        \\                    if (self.auth_config.BearerToken) |t| .{ .override = try std.fmt.allocPrint(self.allocator, "Bearer {s}", .{t}) } else .omit 
+        \\                    else .omit 
+        \\            }
+        \\        };
+        \\
+        \\        var req = try self.client.request(method, try std.Uri.parse(req_url), req_options);
+        \\        defer req.deinit();
+        \\
+        \\        // Body
+        \\        if (@hasField(@TypeOf(options), "body")) {
+        \\             if (method.requestHasBody()) {
+        \\                const body = options.body;
+        \\                var req_body_writer = std.ArrayListUnmanaged(u8){};
+        \\                defer req_body_writer.deinit(self.allocator);
+        \\                try req_body_writer.writer(self.allocator).print("{f}", .{std.json.fmt(body, .{})});
+        \\                req.transfer_encoding = .{ .content_length = req_body_writer.items.len };
+        \\                _ = try req.sendBody(req_body_writer.items);
+        \\             } else {
+        \\                 try req.sendBodiless();
+        \\             }
+        \\        } else {
+        \\            try req.sendBodiless();
+        \\        }
+        \\        
+        \\        var header_buf: [4096]u8 = undefined;
+        \\        var res = try req.receiveHead(&header_buf);
+        \\
+        \\        if (response_type == void) {
+        \\            return;
+        \\        }
+        \\
+        \\        var body_list = std.ArrayListUnmanaged(u8){};
+        \\        const transfer_buf = try self.allocator.alloc(u8, 4096);
+        \\        const body_reader = res.reader(transfer_buf);
+        \\        while (true) {
+        \\            const byte = body_reader.takeByte() catch |err| switch (err) {
+        \\                error.EndOfStream => break,
+        \\                else => return err,
+        \\            };
+        \\            try body_list.append(self.allocator, byte);
+        \\        }
+        \\        
+        \\
+        \\
+        \\
+        \\
+        \\
+        \\
+        \\
+        \\
+        \\        
+        \\        // Parse response
+        \\        // Note: This assumes JSON response for now.
+        \\        const parsed = try std.json.parseFromSliceLeaky(response_type, self.allocator, body_list.items, .{ .ignore_unknown_fields = true });
+        \\        return parsed;
+        \\    }
+        \\
+        \\    pub fn watch(self: *Client, comptime T: type, path: []const u8, options: anytype) !WatchStream(T) {
+        \\        var url_buf: [4096]u8 = undefined;
+        \\        var url_fbs = std.io.fixedBufferStream(&url_buf);
+        \\        const url_w = url_fbs.writer();
+        \\        try url_w.print("{s}{s}", .{ self.base_url, path });
+        \\
+        \\        // Query Params
+        \\        var has_query = false;
+        \\        if (@hasField(@TypeOf(options), "query")) {
+        \\            const query = options.query;
+        \\            const fields = std.meta.fields(@TypeOf(query));
+        \\            inline for (fields) |field| {
+        \\                const val = @field(query, field.name);
+        \\                if (@typeInfo(@TypeOf(val)) == .optional) {
+        \\                    if (val) |v| {
+        \\                        if (!has_query) { try url_w.writeAll("?"); has_query = true; } else try url_w.writeAll("&");
+        \\                        try url_w.print("{s}={any}", .{ field.name, v });
+        \\                    }
+        \\                } else {
+        \\                    if (!has_query) { try url_w.writeAll("?"); has_query = true; } else try url_w.writeAll("&");
+        \\                    try url_w.print("{s}={any}", .{ field.name, val });
+        \\                }
+        \\            }
+        \\        }
+        \\        
+        \\        // Force watch=true if not present
+        \\        if (!has_query) { try url_w.writeAll("?watch=true"); } 
+        \\        else { try url_w.writeAll("&watch=true"); }
+        \\
+        \\        const req_url = url_fbs.getWritten();
+        \\        const content_type = "application/json"; // Default for watch
+        \\
+        \\        const req_options = .{
+        \\            .headers = .{
+        \\                .content_type = .{ .override = content_type },
+        \\                .authorization = if (@hasField(AuthConfig, "BearerToken")) 
+        \\                    if (self.auth_config.BearerToken) |t| .{ .override = try std.fmt.allocPrint(self.allocator, "Bearer {s}", .{t}) } else .omit 
+        \\                    else .omit 
+        \\            }
+        \\        };
+        \\
+        \\        const req = try self.client.request(.GET, try std.Uri.parse(req_url), req_options);
+        \\        const heap_req = try self.allocator.create(std.http.Client.Request);
+        \\        heap_req.* = req;
+        \\        errdefer self.allocator.destroy(heap_req);
+        \\
+        \\        try heap_req.sendBodiless();
+        \\        var header_buf: [4096]u8 = undefined;
+        \\        const res = try heap_req.receiveHead(&header_buf);
+        \\        const transfer_buf = try self.allocator.alloc(u8, 4096);
+        \\        errdefer self.allocator.free(transfer_buf);
+        \\        const reader = res.reader(transfer_buf);
+        \\        return WatchStream(T){ .allocator = self.allocator, .req = heap_req, .transfer_buf = transfer_buf, .reader = reader };
+        \\    }
+    );
 
     const methods = [_][]const u8{ "get", "post", "put", "delete", "patch", "options", "head", "trace" };
     const paths = spec.object.get("paths");
@@ -903,6 +1048,59 @@ fn generateClient(spec: std.json.Value, writer: anytype, allocator: std.mem.Allo
     try writer.print("            }}\n", .{});
     try writer.print("        }}\n", .{});
     try writer.print("    }}\n", .{});
+    try writer.writeAll(
+        \\    pub fn resource(self: *Client, comptime T: type) ResourceClient(T) {
+        \\        return ResourceClient(T){ .client = self };
+        \\    }
+        \\
+        \\    pub fn ResourceClient(comptime T: type) type {
+        \\        if (!@hasDecl(T, "api_metadata")) {
+        \\            @compileError("Type " ++ @typeName(T) ++ " must have 'api_metadata' decl to be used as a resource.");
+        \\        }
+        \\        const metadata = T.api_metadata;
+        \\
+        \\        return struct {
+        \\            client: *Client,
+        \\
+        \\            const Self = @This();
+        \\
+        \\            pub fn list(self: Self, options: anytype) ![]const T {
+        \\                // TODO: Implement proper list logic
+        \\                // For now, we assume a standard GET request to the path
+        \\                return self.client.request(std.http.Method.GET, metadata.path, options, []const T);
+        \\            }
+        \\
+        \\            pub fn create(self: Self, body: T, options: anytype) !T {
+        \\                return self.client.request(std.http.Method.POST, metadata.path, .{ .body = body, .query = options }, T);
+        \\            }
+        \\
+        \\            pub fn get(self: Self, name: []const u8) !T {
+        \\                // Construct path: metadata.path + "/" + name
+        \\                var path_buf: [256]u8 = undefined;
+        \\                const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ metadata.path, name });
+        \\                return self.client.request(std.http.Method.GET, path, .{}, T);
+        \\            }
+        \\
+        \\            pub fn delete(self: Self, name: []const u8, options: anytype) !void {
+        \\                var path_buf: [256]u8 = undefined;
+        \\                const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ metadata.path, name });
+        \\                return self.client.request(std.http.Method.DELETE, path, .{ .query = options }, void);
+        \\            }
+        \\
+        \\            pub fn update(self: Self, name: []const u8, body: T, options: anytype) !T {
+        \\                var path_buf: [256]u8 = undefined;
+        \\                const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ metadata.path, name });
+        \\                return self.client.request(std.http.Method.PUT, path, .{ .body = body, .query = options }, T);
+        \\            }
+        \\
+        \\            pub fn watch(self: Self, options: anytype) !Client.WatchStream(T) {
+        \\                return self.client.watch(T, metadata.path, options);
+        \\            }
+        \\        };
+        \\    }
+    );
+    try writer.print("\n\n", .{});
+
     try writer.print("}};\n\n", .{});
 }
 fn generateResponseTypes(op_id: []const u8, responses: std.json.Value, writer: anytype, allocator: std.mem.Allocator, spec: std.json.Value) ![]const u8 {
